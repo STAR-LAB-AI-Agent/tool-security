@@ -51,6 +51,11 @@ TOOL_REGISTRY: Dict[str, Tool] = {
 }
 
 
+def register_tool(tool: Tool) -> None:
+    """动态注册工具：供 import_tool 等接入器在运行期把新工具加入白名单。"""
+    TOOL_REGISTRY[tool.name] = tool
+
+
 def get_tool(name: str) -> Optional[Tool]:
     """白名单查询：未注册的工具返回 None，禁止调用。"""
     return TOOL_REGISTRY.get(name)

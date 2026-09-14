@@ -57,6 +57,20 @@ metadata: {
 
 若意图超出白名单或目录范围，应直接拦截并给出友好提示，而非尝试绕过。
 
+### 白名单分层（内置工具 vs 外部工具）
+
+不同白名单对两类工具的生效范围不同：
+
+| 白名单 | 内置 func 工具（进程内执行） | 外部 subprocess 工具（external/ 收编） |
+| --- | --- | --- |
+| 工具白名单（tool_policies / 准入） | 生效 | 生效（deny-by-default 准入） |
+| 目录白名单（directory_whitelist） | 生效（进程内 resolve 校验） | 不生效（进程边界） |
+| 命令白名单（command_whitelist） | 生效（进程内 _check_command） | 不生效（进程边界） |
+
+外部工具因独立进程边界，网关只能管控「是否启动 + 传入参数」，无法约束其内部访问的目录与执行的命令；
+其内部危险进程/命令改由 bandit 在接入时静态扫描发现，并作为风险分级依据（命中 `subprocess shell=True`、
+`eval` 等会调高风险等级），而非运行期命令白名单。
+
 ### 评估引擎（安全控制机制的一部分）
 
 本 Skill 集成了两个真实 Python 开源安全工具作为**评估引擎**，在工具「接入/准入」阶段
@@ -68,16 +82,34 @@ metadata: {
 
 ## 2. 先后顺序（步骤与依赖）
 
+> **休眠与激活**：安全控制默认处于**休眠态**（`policy.enabled=false`），此时业务工具旁路执行、只审计不拦截；首次成功执行任一配置工具（如 `import_tool`、`confirm_tool_risk`、`configure_tools`）后自动**激活**并持久化，此后业务工具才进入运行期闸门。
+
 **工具接入阶段（一次性）**：用评估引擎（bandit / pip-audit）扫描新工具源码与依赖，
 自动产出风险等级与白名单准入，写入安全策略 `Policy.tool_policies`。
+
+接入采用**分级确认环**，由「扫描 → 建议分级及原因 → 回显 → 用户确认」四步组成：
+
+1. `import_tool` 复制项目后运行 bandit / pip-audit；
+2. 产出**建议分级** `risk = max(基础风险, bandit 命中风险)`（bandit 只上调、不降级）；
+3. 返回结果中回显 `risk`（建议分级）与 `reasons`（逐条可读中文原因，含 bandit 命中项
+   与依赖漏洞项），此时 `admitted=false`，工具尚未准入；
+4. 用户调用 `confirm_tool_risk` 确认评估分级（省略 `risk` 即沿用），或改成
+   `low/medium/high` 后确认，工具随即被显式准入（`allowed=True`）。
+
+> **接入已有 Skill + Script 项目的边界**：`import_tool` 会把目标项目整包复制到
+> `external/<name>/` 并生成 `skills/<name>/SKILL.md` 声明，但**不会删除或移动原目录**。
+> 若原目录仍在 nanobot 等 Runtime 的扫描范围内（例如之前已 onboard），会出现
+> 「原 SKILL.md 直连原 cli.py」与「声明 SKILL.md 走网关」两个入口，模型可能选错而绕过安全网关。
+> 接入后请把原目录从 Runtime 加载范围移除（或不要重复 onboard），仅保留本项目
+> `skills/<name>/SKILL.md` 这一份声明作为唯一入口。
 
 **运行期（每次调用）**：
 
 1. 路由：把自然语言意图映射到（工具名，参数）。
-2. 工具白名单校验：未注册工具直接拦截。
+2. 工具白名单校验：未注册工具直接拦截；已被策略禁用（allowed=false）或外部工具尚未准入（deny-by-default）同样拦截。
 3. 最小权限门控：工具风险等级超过会话上限则拦截。
 4. 危险操作确认：中/高风险操作请求用户确认，拒绝则终止。
-5. 目录白名单 / 命令白名单校验：越界路径、越权命令拦截。
+5. 目录白名单 / 命令白名单校验：越界路径、越权命令拦截（仅内置工具生效）。
 6. 执行工具，返回结构化结果。
 7. 落审计日志（决策、风险、参数键名、是否执行、错误、耗时）。
 
@@ -123,6 +155,8 @@ python cli.py --list-tools
 
 | 工具 | 参数 | 说明 |
 | --- | --- | --- |
+| import_tool | `path`（必填）; `name`（可选） | 接入外部 Skill + Script 项目：复制到 external/、生成声明、评估风险并注册，默认拦截待准入 |
+| confirm_tool_risk | `tool`（必填）; `risk`（可选：low/medium/high） | 分级确认环：确认或修改已接入工具的评估风险，并显式准入（allowed=True） |
 | assess_tool | `name`（必填）; `source`（必填）; `requirements`（可选） | 接入并评估第三方工具：bandit 划风险、pip-audit 判准入 |
 | assess_builtin_tools | 无 | 用 bandit 自动评估内置工具的风险等级（自检） |
 | set_tool_policy | `tool`（必填）; `allowed`（可选）; `risk`（可选） | 手动设置某工具是否允许及其风险等级 |
@@ -198,4 +232,17 @@ python cli.py --list-tools
 [会话 12345678] 路由模式=关键词，意图：删除 sample.txt
 [危险操作确认] 即将调用工具 'delete_file'（风险 high），参数键 ['path']，是否继续？[y/N] y
 [成功] {'path': '.../data/sample.txt', 'deleted': True}
+```
+
+**示例 7：外部工具接入 + 分级确认环**
+
+```
+> python cli.py --tool import_tool --param path=/path/to/some-tool
+[危险操作确认] 即将调用工具 'import_tool'（风险 high），参数键 ['path']，是否继续？[y/N] y
+[成功] {'tool': 'some-tool', 'risk': 'high', 'admitted': False,
+        'reasons': ['subprocess 使用 shell=True（命令注入风险）（cli.py:12，severity=HIGH）'], ...}
+
+> python cli.py --tool confirm_tool_risk --param tool=some-tool --param risk=medium
+[危险操作确认] 即将调用工具 'confirm_tool_risk'（风险 high），参数键 ['tool', 'risk']，是否继续？[y/N] y
+[成功] {'tool': 'some-tool', 'assessed_risk': 'high', 'confirmed_risk': 'medium', 'allowed': True}
 ```

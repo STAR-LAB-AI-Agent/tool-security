@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from .audit import AuditLogger
 from .config_tools import ConfigExecutor, describe_config_tools_for_llm, get_config_tool
 from .directory_policy import DirectoryPolicy, RuntimePolicy
+from .external_tools import run_external_tool
 from .gateway import ToolGateway
 from .llm_router import LLMRouter
 from .policy_store import Policy, load_policy, save_policy
@@ -40,11 +41,13 @@ _GENERIC_DIR_WORDS = {"目录", "当前目录", "文件夹", "文件", "内容"}
 # 配置类意图（优先于业务意图匹配，关键词兜底；复杂配置应走 LLM 路由）。
 _CONFIG_INTENT_RULES: List[Tuple[str, re.Pattern]] = [
     ("assess_builtin_tools", re.compile(r"评估内置工具|内置工具评估|内置工具.*风险|安全自检")),
-    ("assess_tool", re.compile(r"评估.*(工具|风险|等级)|接入.*工具|审计.*工具|工具.*(评估|审计)")),
+    ("import_tool", re.compile(r"接入|导入|收编|onboard|import")),
+    ("assess_tool", re.compile(r"评估.*(工具|风险|等级)|审计.*工具|扫描.*工具|工具.*(评估|审计|扫描)")),
     ("configure_tools", re.compile(r"安全控制|权限划分|权限设置|权限配置|工具安全")),
     ("set_max_risk", re.compile(r"最小权限|只读权限|风险等级|最大风险")),
     ("add_directory_whitelist", re.compile(r"目录白名单|允许访问.*目录|只允许访问")),
     ("add_command_whitelist", re.compile(r"命令白名单|允许执行.*命令|只允许.*命令")),
+    ("confirm_tool_risk", re.compile(r"分级|准入|确认.*(风险|等级)|(分级|风险).*(改成|改为|修改|调整|设为)")),
     ("set_tool_policy", re.compile(r"限制.*(使用|调用)|禁止.*(使用|调用)|允许.*(使用|调用)|禁用|启用")),
 ]
 
@@ -125,6 +128,14 @@ class ToolSecurityAgent:
             m = re.search(r"\b(low|medium|high)\b", intent, re.IGNORECASE)
             if m:
                 return {"risk": m.group(1).lower()}
+        if tool_name == "import_tool":
+            # 兜底抽取：引号内路径或「接入/导入」后的文本作为项目路径
+            quoted = re.search(r"[\"“']([^\"”']+)[\"”']", intent)
+            if quoted:
+                return {"path": quoted.group(1)}
+            m = re.search(r"(?:接入|导入|收编)\s*[:：]?\s*(.+)", intent)
+            if m and m.group(1).strip():
+                return {"path": m.group(1).strip()}
         if tool_name == "assess_tool":
             # 兜底抽取：引号内路径作为 source，显式「工具/名称」词后作为 name
             params: Dict[str, Any] = {}
@@ -134,6 +145,28 @@ class ToolSecurityAgent:
             m = re.search(r"(?:工具|名称|name)\s*[：:]?\s*([\w.-]+)", intent, re.IGNORECASE)
             if m:
                 params["name"] = m.group(1).strip()
+            return params
+        if tool_name == "confirm_tool_risk":
+            # 兜底抽取：引号内名称或「工具/名称：」后为 tool，low/medium/high 为 risk
+            params: Dict[str, Any] = {}
+            quoted = re.search(r"[\"“']([^\"”']+)[\"”']", intent)
+            if quoted:
+                params["tool"] = quoted.group(1)
+            else:
+                m = re.search(r"(?:工具|名称|name)\s*[：:]?\s*([\w.-]+)", intent, re.IGNORECASE)
+                if m:
+                    params["tool"] = m.group(1).strip()
+                else:
+                    m2 = re.search(r"(?:确认|准入|把|将)\s*[:：]?\s*([\w.-]+)", intent)
+                    if m2:
+                        params["tool"] = m2.group(1).strip()
+                    else:
+                        m3 = re.search(r"([\w.-]+)\s*(?:分级|风险|等级)", intent)
+                        if m3:
+                            params["tool"] = m3.group(1).strip()
+            m = re.search(r"\b(low|medium|high)\b", intent, re.IGNORECASE)
+            if m:
+                params["risk"] = m.group(1).lower()
             return params
         return {}
 
@@ -240,7 +273,12 @@ class ToolSecurityAgent:
             ALL_COMMANDS,
         )
         try:
-            data = tool.func(runtime, **params)
+            if tool.external is not None:
+                data = run_external_tool(tool.external, params)
+            elif tool.func is not None:
+                data = tool.func(runtime, **params)
+            else:
+                raise SecurityError(f"工具 '{tool_name}' 缺少可执行实现")
             self.audit.record(
                 self.session_id, intent_label, tool_name, tool.risk, params_keys,
                 "passthrough", "休眠态旁路执行（安全控制未激活）", True,

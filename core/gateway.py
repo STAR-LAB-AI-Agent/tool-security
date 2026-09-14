@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Set
 
 from .audit import AuditLogger
 from .directory_policy import DirectoryPolicy, RuntimePolicy
+from .external_tools import run_external_tool
 from .guard import confirm_operation
 from .policy_store import Policy
 from .registry import get_tool
@@ -122,6 +123,16 @@ class ToolGateway:
             reason = f"工具策略拦截：工具 '{tool_name}' 已被安全策略禁用"
             return _record("blocked", reason, reason)
 
+        # 闸门 1.3：默认拒绝（deny-by-default）。注册时 enabled_by_default=False 的
+        # 工具（如新接入的外部工具），必须先在安全策略中显式准入（allowed=True）才可调用。
+        if not tool.enabled_by_default:
+            if override is None or not override.allowed:
+                reason = (
+                    f"工具未准入：'{tool_name}' 尚未显式准入，"
+                    f"请先通过风险控制流程（confirm_tool_risk 确认分级）准入"
+                )
+                return _record("blocked", reason, reason)
+
         # 闸门 1.5：任务级最小权限集（自动推导）。不在集合内则拦截。
         if allowed_tools is not None and tool_name not in allowed_tools:
             reason = (
@@ -159,7 +170,12 @@ class ToolGateway:
 
         # 闸门 4/5：目录白名单 + 命令白名单（工具内部） + 执行
         try:
-            data = tool.func(self.runtime_policy, **params)
+            if tool.external is not None:
+                data = run_external_tool(tool.external, params)
+            elif tool.func is not None:
+                data = tool.func(self.runtime_policy, **params)
+            else:
+                raise SecurityError(f"工具 '{tool_name}' 缺少可执行实现")
             result = ToolResult(ok=True, data=data, decision="allowed")
             self.audit.record(
                 self.session_id, intent_label, tool_name, effective_risk, params_keys,
@@ -174,6 +190,11 @@ class ToolGateway:
 
     @staticmethod
     def _filter_params(tool: Tool, params: Dict[str, Any]) -> Dict[str, Any]:
-        """按工具函数签名过滤参数，丢弃调用方可能多给的键，避免 TypeError。"""
+        """按工具函数签名过滤参数，丢弃调用方可能多给的键，避免 TypeError。
+
+        外部工具无 func，参数透传（由目标 cli.py 自行解析）。
+        """
+        if tool.external is not None:
+            return dict(params)
         allowed = set(inspect.signature(tool.func).parameters) - {"policy"}
         return {k: v for k, v in params.items() if k in allowed}

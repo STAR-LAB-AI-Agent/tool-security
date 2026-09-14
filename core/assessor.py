@@ -92,14 +92,17 @@ class ToolAssessment:
 
 # --------------------------------------------------------------------------- bandit
 def run_bandit(source: Path) -> List[BanditFinding]:
-    """调用 bandit 扫描单个源码文件，返回命中列表（离线可用，无需联网）。"""
+    """调用 bandit 扫描源码文件或目录，返回命中列表（离线可用，无需联网）。"""
     p = Path(source)
-    if not p.is_file():
+    if not p.exists():
         raise SecurityError(f"待评估源码不存在：{p}")
+    cmd = [sys.executable, "-m", "bandit", "-f", "json", "-q"]
+    if p.is_dir():
+        cmd.append("-r")
+    cmd.append(str(p))
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "bandit", "-f", "json", "-q", str(p)],
-            capture_output=True, text=True, timeout=_BANDIT_TIMEOUT,
+            cmd, capture_output=True, text=True, timeout=_BANDIT_TIMEOUT,
         )
     except subprocess.TimeoutExpired as e:
         raise SecurityError(f"bandit 扫描超时（>{_BANDIT_TIMEOUT}s）") from e
@@ -127,6 +130,39 @@ def _max_severity_risk(findings: List[BanditFinding]) -> RiskLevel:
     if not findings:
         return RiskLevel.LOW
     return max((severity_to_risk(f.severity) for f in findings), key=lambda r: r.rank)
+
+
+# bandit test_id → 可读的「分级原因」描述（只覆盖与危险进程/命令/敏感信息相关的高频项）。
+_BANDIT_REASON_MAP = {
+    "B102": "使用 exec/eval 或硬编码敏感信息",
+    "B404": "导入 subprocess（可执行外部进程）",
+    "B602": "subprocess 使用 shell=True（命令注入风险）",
+    "B603": "调用 subprocess 执行外部进程",
+    "B605": "以 shell 启动外部进程",
+    "B606": "启动外部进程未使用绝对路径",
+    "B607": "启动外部进程使用了部分路径",
+}
+
+
+def explain_reasons(
+    findings: List[BanditFinding],
+    vulnerabilities: List[DependencyVuln],
+) -> List[str]:
+    """把 bandit 命中与依赖漏洞翻译成可读的「建议分级原因」列表，供接入后回显给用户确认。"""
+    reasons: List[str] = []
+    seen = set()
+    for f in findings:
+        base = _BANDIT_REASON_MAP.get(f.test_id, f"bandit 命中 {f.test_id}")
+        reason = f"{base}（{f.filename}:{f.line}，severity={f.severity}）"
+        if reason not in seen:
+            reasons.append(reason)
+            seen.add(reason)
+    for v in vulnerabilities:
+        fix = "、".join(v.fix_versions) or "暂无"
+        reasons.append(
+            f"依赖 {v.package} {v.version} 存在已知漏洞 {v.vuln_id}（修复版本：{fix}）"
+        )
+    return reasons or ["未发现危险模式（bandit 无命中、无依赖漏洞）"]
 
 
 # --------------------------------------------------------------------------- pip-audit

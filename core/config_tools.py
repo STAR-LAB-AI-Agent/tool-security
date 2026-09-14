@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Optional, Union
 from .assessor import assess_builtin_tools, assess_tool_source
 from .audit import AuditLogger
 from .guard import confirm_operation
+from .importer import import_external_tool
 from .policy_store import Policy, ToolPolicy, save_policy
 from .registry import TOOL_REGISTRY
 from .security import AgentConfig, RiskLevel, SecurityError, Tool, ToolResult
@@ -122,6 +123,54 @@ def _configure_tools(
     return policy.to_dict()
 
 
+def _import_tool(
+    policy: Policy,
+    path: str,
+    name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """接入一个外部 Skill + Script 项目：复制、声明、评估、注册，默认未准入。"""
+    result = import_external_tool(path, name=name)
+    # 评估结果写入策略：记录风险等级，但 allowed=False（deny-by-default，需显式准入）。
+    policy.tool_policies[result["tool"]] = ToolPolicy(
+        allowed=False,
+        risk=RiskLevel(result["risk"]),
+    )
+    return result
+
+
+def _confirm_tool_risk(
+    policy: Policy,
+    tool: str,
+    risk: Optional[str] = None,
+) -> Dict[str, Any]:
+    """分级确认环：确认或修改已接入工具的评估风险，并显式准入（allowed=True）。
+
+    - risk 缺省时沿用当前评估风险（策略覆盖 > 注册表默认），即「确认分级」；
+    - risk 显式给出时视为「修改分级」；
+    - 确认后写入 policy.tool_policies，由 ToolGateway 在运行期消费生效。
+    """
+    registered = TOOL_REGISTRY.get(tool)
+    if registered is None:
+        raise SecurityError(f"工具 '{tool}' 未注册，请先通过 import_tool 接入")
+
+    current = policy.tool_policies.get(tool)
+    assessed = (
+        current.risk
+        if current is not None and current.risk is not None
+        else registered.risk
+    )
+    confirmed = _parse_risk(risk) if risk is not None else assessed
+
+    policy.tool_policies[tool] = ToolPolicy(allowed=True, risk=confirmed)
+
+    return {
+        "tool": tool,
+        "assessed_risk": assessed.value,
+        "confirmed_risk": confirmed.value,
+        "allowed": True,
+    }
+
+
 def _assess_tool(
     policy: Policy,
     name: Optional[str] = None,
@@ -195,6 +244,22 @@ CONFIG_REGISTRY: Dict[str, Tool] = {
         risk=RiskLevel.HIGH,
         category="安全配置",
         params_desc="command（命令，必填）; action（add/remove，默认 add）",
+    ),
+    "import_tool": Tool(
+        name="import_tool",
+        description="接入一个外部 Skill + Script 项目：自动复制到 external/、生成声明、评估风险并注册，默认拦截待准入",
+        func=_import_tool,
+        risk=RiskLevel.HIGH,
+        category="安全配置",
+        params_desc="path（项目路径，必填）; name（自定义工具名，可选）",
+    ),
+    "confirm_tool_risk": Tool(
+        name="confirm_tool_risk",
+        description="确认或修改某个已接入工具的评估风险，并显式准入（分级确认环）",
+        func=_confirm_tool_risk,
+        risk=RiskLevel.HIGH,
+        category="安全配置",
+        params_desc="tool（工具名，必填）; risk（low/medium/high，可选，缺省沿用评估风险）",
     ),
     "assess_tool": Tool(
         name="assess_tool",

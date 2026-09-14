@@ -21,16 +21,31 @@ class RiskLevel(enum.Enum):
 
 
 @dataclass
+class ExternalToolSpec:
+    """外部接入工具（subprocess 包装）的执行规格。
+
+    外部工具是独立的 Skill + Script 项目，网关无法进入其进程内部，
+    只能通过 subprocess 调用它的脚本入口，并管控「是否启动 + 传入参数」。
+    """
+
+    workdir: str                    # 目标项目根目录（脚本入口所在目录）
+    entry: str = "cli.py"           # 脚本入口文件名
+    tool_name: Optional[str] = None  # 透传给目标 cli.py 的 --tool（可选）
+
+
+@dataclass
 class Tool:
     """工具元数据，是「工具白名单」的唯一登记入口。"""
 
     name: str
     description: str
-    func: Callable[..., Any]
     risk: RiskLevel
+    func: Optional[Callable[..., Any]] = None  # 内置工具的实现函数；外部工具为 None
     category: str = "通用"
     requires_confirmation: bool = False
     params_desc: str = ""  # 参数说明，注入给 LLM 用于准确抽取参数
+    external: Optional[ExternalToolSpec] = None  # 非 None 表示外部 subprocess 工具
+    enabled_by_default: bool = True  # False 表示需先经风险控制流程显式准入，否则默认拦截
 
     def __post_init__(self) -> None:
         # 默认：中/高风险操作需要用户确认，低风险只读操作自动放行

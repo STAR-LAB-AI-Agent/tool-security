@@ -5,10 +5,13 @@ import unittest
 from pathlib import Path
 
 from core.assessor import (
+    BanditFinding,
+    DependencyVuln,
     _parse_pip_audit_json,
     assess_builtin_tools,
     assess_tool_source,
     audit_dependencies,
+    explain_reasons,
     run_bandit,
     severity_to_risk,
 )
@@ -91,6 +94,40 @@ class TestAuditDependencies(unittest.TestCase):
         status, vulns = audit_dependencies(Path("/nonexistent/requirements.txt"))
         self.assertEqual(status, "no_deps")
         self.assertEqual(vulns, [])
+
+
+class TestExplainReasons(unittest.TestCase):
+    def test_no_findings_returns_fallback(self):
+        reasons = explain_reasons([], [])
+        self.assertEqual(reasons, ["未发现危险模式（bandit 无命中、无依赖漏洞）"])
+
+    def test_bandit_shell_true_reason(self):
+        findings = [BanditFinding("B602", "HIGH", 12, "shell=True", "tool.py")]
+        reasons = explain_reasons(findings, [])
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("shell=True", reasons[0])
+        self.assertIn("tool.py:12", reasons[0])
+
+    def test_unknown_test_id_falls_back_to_id(self):
+        findings = [BanditFinding("B999", "LOW", 3, "x", "tool.py")]
+        reasons = explain_reasons(findings, [])
+        self.assertIn("B999", reasons[0])
+
+    def test_dependency_vuln_reason(self):
+        vulns = [DependencyVuln("demo", "1.0", "PYSEC-1", ["CVE-1"], ["1.1"])]
+        reasons = explain_reasons([], vulns)
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("PYSEC-1", reasons[0])
+        self.assertIn("1.1", reasons[0])
+        self.assertIn("demo", reasons[0])
+
+    def test_dedup_identical_bandit_findings(self):
+        findings = [
+            BanditFinding("B602", "HIGH", 12, "shell=True", "tool.py"),
+            BanditFinding("B602", "HIGH", 12, "shell=True", "tool.py"),
+        ]
+        reasons = explain_reasons(findings, [])
+        self.assertEqual(len(reasons), 1)
 
 
 class TestAssessToolSource(unittest.TestCase):

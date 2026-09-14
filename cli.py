@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from core.agent import ToolSecurityAgent
 from core.audit import AuditLogger
 from core.directory_policy import DirectoryPolicy
+from core.external_tools import register_external_tools_from_disk
 from core.llm_router import LLMRouter
 from core.security import AgentConfig, RiskLevel, SecurityError
 from core.settings import load_dotenv
@@ -30,6 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 WORKSPACE = PROJECT_ROOT / "data"          # 目录白名单允许的根目录
 AUDIT_LOG = PROJECT_ROOT / "logs" / "audit.jsonl"  # 审计日志（位于白名单之外）
 POLICY_PATH = PROJECT_ROOT / "config" / "policy.json"  # 安全策略（配置期写入）
+EXTERNAL_REGISTRY = PROJECT_ROOT / "config" / "external_tools.json"  # 外部工具注册表
 
 
 def parse_risk(s: str) -> RiskLevel:
@@ -56,6 +58,8 @@ def _parse_params(params_json: Optional[str], param_kvs: List[str]) -> Dict[str,
 
 
 def build_agent(max_risk: RiskLevel, auto_approve: bool, use_llm: bool = True) -> ToolSecurityAgent:
+    # 恢复上次接入的外部工具注册（进程每次运行都会重新加载）。
+    register_external_tools_from_disk(EXTERNAL_REGISTRY)
     policy = DirectoryPolicy([WORKSPACE])
     audit = AuditLogger(AUDIT_LOG)
     llm_router = None

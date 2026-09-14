@@ -44,7 +44,8 @@ class TestConfigRegistry(unittest.TestCase):
             {
                 "configure_tools", "set_tool_policy", "set_max_risk",
                 "add_directory_whitelist", "add_command_whitelist",
-                "assess_tool", "assess_builtin_tools",
+                "import_tool", "confirm_tool_risk", "assess_tool",
+                "assess_builtin_tools",
             },
         )
         self.assertIsNotNone(get_config_tool("set_max_risk"))
@@ -109,6 +110,38 @@ class TestConfigExecutor(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             ex = _make_executor(Path(d), confirm_fn=lambda tool, keys: True)
             result = ex.execute("set_max_risk", {"risk": "critical"})
+            self.assertFalse(result.ok)
+            self.assertEqual(result.decision, "blocked")
+
+    def test_confirm_tool_risk_keeps_assessed(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex = _make_executor(Path(d), confirm_fn=lambda tool, keys: True)
+            result = ex.execute("confirm_tool_risk", {"tool": "delete_file"})
+            self.assertTrue(result.ok)
+            self.assertTrue(ex.policy.tool_policies["delete_file"].allowed)
+            self.assertEqual(ex.policy.tool_policies["delete_file"].risk, RiskLevel.HIGH)
+            self.assertEqual(result.data["assessed_risk"], "high")
+            self.assertEqual(result.data["confirmed_risk"], "high")
+
+    def test_confirm_tool_risk_modify(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex = _make_executor(Path(d), confirm_fn=lambda tool, keys: True)
+            result = ex.execute("confirm_tool_risk", {"tool": "delete_file", "risk": "low"})
+            self.assertTrue(result.ok)
+            self.assertEqual(ex.policy.tool_policies["delete_file"].risk, RiskLevel.LOW)
+            self.assertEqual(result.data["confirmed_risk"], "low")
+
+    def test_confirm_tool_risk_unregistered_blocked(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex = _make_executor(Path(d), confirm_fn=lambda tool, keys: True)
+            result = ex.execute("confirm_tool_risk", {"tool": "nope"})
+            self.assertFalse(result.ok)
+            self.assertEqual(result.decision, "blocked")
+
+    def test_confirm_tool_risk_invalid_risk_blocked(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex = _make_executor(Path(d), confirm_fn=lambda tool, keys: True)
+            result = ex.execute("confirm_tool_risk", {"tool": "delete_file", "risk": "critical"})
             self.assertFalse(result.ok)
             self.assertEqual(result.decision, "blocked")
 
