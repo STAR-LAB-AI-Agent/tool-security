@@ -4,17 +4,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.agent import ToolSecurityAgent
-from agent.audit import AuditLogger
-from agent.config_tools import (
+from core.agent import ToolSecurityAgent
+from core.audit import AuditLogger
+from core.config_tools import (
     CONFIG_REGISTRY,
     ConfigExecutor,
     describe_config_tools_for_llm,
     get_config_tool,
 )
-from agent.directory_policy import DirectoryPolicy
-from agent.policy_store import Policy, load_policy
-from agent.security import AgentConfig, RiskLevel
+from core.directory_policy import DirectoryPolicy
+from core.policy_store import Policy, load_policy
+from core.security import AgentConfig, RiskLevel
 
 
 def _make_executor(

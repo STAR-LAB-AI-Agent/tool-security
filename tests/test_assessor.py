@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.assessor import (
+from core.assessor import (
     _parse_pip_audit_json,
     assess_builtin_tools,
     assess_tool_source,
@@ -12,7 +12,7 @@ from agent.assessor import (
     run_bandit,
     severity_to_risk,
 )
-from agent.security import RiskLevel, SecurityError
+from core.security import RiskLevel, SecurityError
 
 
 class TestSeverityMapping(unittest.TestCase):

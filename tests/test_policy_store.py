@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.policy_store import Policy, ToolPolicy, load_policy, save_policy
-from agent.security import RiskLevel
+from core.policy_store import Policy, ToolPolicy, load_policy, save_policy
+from core.security import RiskLevel
 
 
 class TestPolicyStore(unittest.TestCase):

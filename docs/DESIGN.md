@@ -109,7 +109,7 @@
 
 ## 8. 落地步骤
 
-- **M1**：定义 `Policy` 数据结构 + `policy.json` 读写（`agent/policy_store.py`）。
+- **M1**：定义 `Policy` 数据结构 + `policy.json` 读写（`core/policy_store.py`）。
 - **M2**：注册配置工具，接入 LLM 路由与关键词路由。
 - **M3**：实现多轮确认向导（`configure_tools` 对话式流程）。
 - **M4**：`ToolGateway` 启动时加载 `policy.json`，替代写死的默认策略。

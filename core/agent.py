@@ -198,6 +198,21 @@ class ToolSecurityAgent:
             tool_name, params, intent_label=intent_label, allowed_tools=allowed_tools,
         )
 
+    def run_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
+        """结构化调用入口：调用方已选好工具与参数，直接执行，不做意图路由。
+
+        与 run() 的区别：run() 先 route() 把自然语言翻译成（工具名，参数）；
+        run_tool() 跳过路由，直接交给对应执行器。适合宿主 agent（如 nanobot）以
+        Skill + Script 方式调用：宿主 LLM 已完成「选工具 + 抽参数」，此处不再重复
+        理解，也不依赖本项目的 LLM / 关键词路由。
+        """
+        self._require_known_tool(tool_name)
+        if get_config_tool(tool_name) is not None:
+            return self._run_config(tool_name, params, tool_name)
+        if not self.policy.enabled:
+            return self._execute_unrestricted(tool_name, params, tool_name)
+        return self.gateway.execute(tool_name, params, intent_label=tool_name)
+
     def _run_config(self, tool_name: str, params: Dict[str, Any], intent_label: str) -> Any:
         """配置工具走 ConfigExecutor（强制确认 + 审计）；成功后激活安全控制并持久化。"""
         result = self.config_executor.execute(tool_name, params, intent_label=intent_label)

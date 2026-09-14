@@ -4,14 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.agent import ToolSecurityAgent
-from agent.audit import AuditLogger
-from agent.directory_policy import DirectoryPolicy
-from agent.gateway import ToolGateway
-from agent.llm_router import LLMRouter
-from agent.policy_store import Policy
-from agent.registry import TOOL_REGISTRY, describe_tools, get_tool, require_tool
-from agent.security import AgentConfig, RiskLevel, SecurityError
+from core.agent import ToolSecurityAgent
+from core.audit import AuditLogger
+from core.directory_policy import DirectoryPolicy
+from core.gateway import ToolGateway
+from core.llm_router import LLMRouter
+from core.policy_store import Policy
+from core.registry import TOOL_REGISTRY, describe_tools, get_tool, require_tool
+from core.security import AgentConfig, RiskLevel, SecurityError
 
 
 def _make_agent(workspace: Path, audit_log: Path, policy=None, **config_kwargs):

@@ -3,11 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.audit import AuditLogger
-from agent.directory_policy import DirectoryPolicy
-from agent.gateway import ToolGateway
-from agent.policy_store import Policy, ToolPolicy
-from agent.security import AgentConfig, RiskLevel
+from core.audit import AuditLogger
+from core.directory_policy import DirectoryPolicy
+from core.gateway import ToolGateway
+from core.policy_store import Policy, ToolPolicy
+from core.security import AgentConfig, RiskLevel
 
 
 def _make_gateway(tmp: Path, policy=None, **config_kwargs) -> ToolGateway:

@@ -32,7 +32,7 @@
 ```
 topic26_agent_tool_security/
 ├── cli.py                  # 独立 CLI 入口
-├── agent/
+├── core/
 │   ├── security.py         # 风险等级、工具元数据、结果、异常
 │   ├── tools.py            # 工具实现 + 命令白名单
 │   ├── registry.py         # 工具白名单 + 最小权限门控
@@ -101,7 +101,7 @@ DEEPSEEK_MODEL=deepseek-chat
 
 ## 工具与 Skill 使用方式
 
-- 工具白名单见 `agent/registry.py` 的 `TOOL_REGISTRY`。
+- 工具白名单见 `core/registry.py` 的 `TOOL_REGISTRY`。
 - Skill 说明见 `skills/tool-security/SKILL.md`（使用场景、参数、调用方式、结果格式、示例）。
 
 ## 开源依赖与许可证

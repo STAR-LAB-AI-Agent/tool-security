@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "max_risk": "high",
+  "auto_approve": false,
+  "tool_policies": {
+    "list_dir": {
+      "allowed": true,
+      "risk": "low"
+    },
+    "read_file": {
+      "allowed": true,
+      "risk": "low"
+    },
+    "write_file": {
+      "allowed": true,
+      "risk": "medium"
+    },
+    "delete_file": {
+      "allowed": true,
+      "risk": "high"
+    },
+    "run_command": {
+      "allowed": true,
+      "risk": "high"
+    }
+  },
+  "directory_whitelist": [],
+  "command_whitelist": [],
+  "confirm_required": [],
+  "enabled": true
+}
