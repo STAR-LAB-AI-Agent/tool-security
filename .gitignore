@@ -4,3 +4,11 @@ __pycache__/
 .venv/
 venv/
 .env
+
+# nanobot local workspace files (not part of the course deliverable)
+AGENTS.md
+HEARTBEAT.md
+SOUL.md
+USER.md
+memory/
+prompts/

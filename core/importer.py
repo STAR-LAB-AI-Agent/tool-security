@@ -2,8 +2,8 @@
 
 职责：读目标 SKILL.md → 复制整项目到 external/<name>/ → 生成声明 SKILL.md
 → bandit/pip-audit 评估 → 写 external_tools.json → 动态注册进 TOOL_REGISTRY。
-接入后的工具默认 deny-by-default（enabled_by_default=False），需经风险控制
-流程显式准入后才可调用。
+接入后的工具默认 deny-by-default（enabled_by_default=False），准入决定由
+上层 _import_tool 完成（可交互确认，或非交互按建议直接准入）。
 """
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def _build_declaration(name: str, description: str) -> str:
         "```\n"
         f"python cli.py --tool {name} --param key=value\n"
         "```\n\n"
-        "工作目录为项目根。该工具默认拦截（deny-by-default），需先经风险控制流程准入。\n"
+        "工作目录为项目根。该工具默认拦截（deny-by-default），接入时由 import_tool 完成风险分级与准入。\n"
     )
 
 
@@ -90,7 +90,10 @@ def import_external_tool(
     """接入一个外部 Skill + Script 项目，返回接入结果。
 
     流程：读 SKILL.md → 复制到 external/<name>/ → 生成声明 SKILL.md →
-    评估 → 持久化注册表 → 动态注册。默认 deny-by-default。
+    评估 → 持久化注册表 → 动态注册。
+
+    本函数只做机械接入，不决定准入（返回 admitted=False）；准入由上层
+    _import_tool 完成（交互确认或非交互按建议直接准入）。
     """
     src = Path(project_path).expanduser().resolve()
     if not src.is_dir():
@@ -168,5 +171,5 @@ def import_external_tool(
         "pip_audit_status": assessment.pip_audit_status,
         "bandit_findings": [f.to_dict() for f in assessment.findings],
         "vulnerabilities": [v.to_dict() for v in assessment.vulnerabilities],
-        "admitted": False,  # deny-by-default，需 confirm_tool_risk 确认分级后准入
+        "admitted": False,  # 接入器不决定准入，由上层 _import_tool 完成确认/准入
     }

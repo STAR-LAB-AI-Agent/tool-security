@@ -259,24 +259,58 @@ class TestDenyByDefault(unittest.TestCase):
 
 
 class TestImportToolPolicyWrite(unittest.TestCase):
-    def test_writes_deny_by_default_policy(self):
-        fake = {
+    def _fake_result(self, risk="low"):
+        return {
             "tool": "ext_x",
             "description": "d",
             "workdir": "/tmp/ext_x",
             "declaration": "/tmp/skills/ext_x/SKILL.md",
-            "risk": "low",
+            "risk": risk,
+            "reasons": ["未发现危险模式（bandit 无命中、无依赖漏洞）"],
             "pip_audit_status": "no_deps",
             "bandit_findings": [],
             "vulnerabilities": [],
             "admitted": False,
         }
+
+    def test_non_interactive_admits_by_suggested_risk(self):
         policy = Policy()
-        with mock.patch("core.config_tools.import_external_tool", return_value=fake):
-            result = _import_tool(policy, "/tmp/fake_project")
-        self.assertEqual(result, fake)
-        self.assertIn("ext_x", policy.tool_policies)
-        self.assertFalse(policy.tool_policies["ext_x"].allowed)
+        with mock.patch(
+            "core.config_tools.import_external_tool",
+            return_value=self._fake_result(),
+        ):
+            result = _import_tool(policy, "/tmp/fake_project", interactive=False)
+        self.assertTrue(result["admitted"])
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["confirmed_risk"], "low")
+        self.assertTrue(policy.tool_policies["ext_x"].allowed)
+        self.assertEqual(policy.tool_policies["ext_x"].risk, RiskLevel.LOW)
+
+    def test_interactive_confirm_keeps_suggested_risk(self):
+        policy = Policy()
+        with mock.patch(
+            "core.config_tools.import_external_tool",
+            return_value=self._fake_result(risk="high"),
+        ):
+            result = _import_tool(
+                policy, "/tmp/fake_project",
+                input_fn=lambda prompt: "y", interactive=True,
+            )
+        self.assertEqual(result["confirmed_risk"], "high")
+        self.assertTrue(policy.tool_policies["ext_x"].allowed)
+        self.assertEqual(policy.tool_policies["ext_x"].risk, RiskLevel.HIGH)
+
+    def test_interactive_modify_risk(self):
+        policy = Policy()
+        with mock.patch(
+            "core.config_tools.import_external_tool",
+            return_value=self._fake_result(risk="high"),
+        ):
+            result = _import_tool(
+                policy, "/tmp/fake_project",
+                input_fn=lambda prompt: "low", interactive=True,
+            )
+        self.assertEqual(result["confirmed_risk"], "low")
         self.assertEqual(policy.tool_policies["ext_x"].risk, RiskLevel.LOW)
 
 

@@ -12,11 +12,11 @@ bandit / pip-audit 作为「评估引擎」需按 `requirements.txt` 安装。
 自然语言意图
     │
     ├─[接入阶段] 工具准入评估   assessor.py      bandit 划风险等级 / pip-audit 判白名单准入
-    │              + 分级确认环  importer.py     建议分级 + 原因回显 → confirm_tool_risk 用户确认
+    │              + 分级确认环  importer.py     建议分级 + 原因回显 → 用户确认准入（交互/非交互）
     │                                          （结果写入 Policy.tool_policies）
     ├─[闸门 1]   工具白名单      registry.py     未注册工具一律拦截
     ├─[闸门 1.2] 策略禁用        policy_store.py 被策略显式禁用（allowed=false）的工具拦截
-    ├─[闸门 1.3] 默认拒绝        gateway.py      外部工具 deny-by-default，未准入（confirm_tool_risk）拦截
+    ├─[闸门 1.3] 默认拒绝        gateway.py      外部工具 deny-by-default，未准入（allowed=false）拦截
     ├─[闸门 2]   最小权限        registry.py     风险分级 + 会话 max_risk 门控
     ├─[闸门 3]   危险操作确认    guard.py        中/高风险需用户确认
     ├─[闸门 4]   目录白名单      directory_policy.py  越界路径拦截（仅内置工具生效）
@@ -49,6 +49,23 @@ bandit / pip-audit 作为「评估引擎」需按 `requirements.txt` 安装。
 - 激活后，业务工具的每次调用都穿过全部运行期闸门（工具白名单 → 最小权限 → 确认 → 目录/命令白名单）。
 - 配置工具（元操作）无论休眠或激活都走独立的 `ConfigExecutor`，且**强制用户确认**（`--auto-approve` 对配置工具不生效），防止智能体静默给自己开权限。
 
+### 显式批准（两段式，供非交互 Agent 环境）
+
+配置工具修改的是安全策略本身，必须由人类显式授权。但 nanobot 等 Agent Runtime 在非交互子进程（无 TTY）
+中调用工具，无法就地 `input()` 确认。因此采用**两段式待批准**，既不静默放行、也不一拒了之：
+
+1. Agent 在非交互环境调用配置工具 → 生成**待批准请求**并返回 `request_id`（`decision=pending`，退出码 `4`），此时不做任何策略修改；
+2. 人类在本机交互终端执行 `python cli.py --approve <request_id>`，逐条审查后批准；
+3. Agent 携带 `--pending-id <request_id>` 重放同一调用 → 校验通过（已批准 / 未过期 / 工具与参数完全一致）后才执行，请求被**一次性消费**。
+
+```bash
+python cli.py --tool set_max_risk --param risk=low                    # 1) 生成待批准请求
+python cli.py --approve <request_id>                                  # 2) 人类审查并批准
+python cli.py --tool set_max_risk --param risk=low --pending-id <request_id>  # 3) 重放执行
+```
+
+约束：请求一次性消费、默认 10 分钟过期、绑定精确的工具与参数（不可复用）；`configure_tools` 多轮向导仍只支持交互终端。
+
 ## 目录结构
 
 ```
@@ -66,6 +83,7 @@ topic26_agent_tool_security/
 │   ├── importer.py         # 工具接入器（import_tool：复制/声明/评估/注册）
 │   ├── assessor.py         # 工具准入评估引擎（bandit + pip-audit + 分级原因）
 │   ├── config_tools.py     # 安全配置工具 + 配置执行器（含分级确认环）
+│   ├── pending_approval.py # 显式批准：待批准请求存储（两段式，非交互 Agent 环境）
 │   ├── gateway.py          # 工具安全执行网关（运行期闸门）
 │   ├── settings.py         # .env 读取（零依赖）
 │   ├── llm_router.py       # DeepSeek LLM 意图路由（urllib）
@@ -140,20 +158,28 @@ DEEPSEEK_MODEL=deepseek-chat
 Skill + Script 项目收编进安全网关：整包复制到 `external/<name>/`、生成声明、bandit/pip-audit
 评估，并注册为 deny-by-default。
 
-接入即触发**分级确认环**：
+接入即触发**分级确认环**，并在 `import_tool` 内一步完成：
 
 1. **扫描**：bandit 扫源码危险模式（`B602 shell=True`、`B404 subprocess`、`B102 硬编码密钥` 等），
    pip-audit 扫 `requirements.txt` 已知 CVE；
 2. **建议分级**：`risk = max(基础风险, bandit 命中风险)`，bandit 只上调、不降级；
-3. **原因回显**：`import_tool` 返回 `risk`（建议分级）与 `reasons`（逐条可读中文原因），供用户审阅；
-4. **最终确认**：用户用 `confirm_tool_risk` 确认评估分级（或改成 `low/medium/high`），
-   该工具随即被显式准入（`allowed=True`）。
+3. **原因回显**：回显 `risk`（建议分级）与 `reasons`（逐条可读中文原因）；
+4. **确认准入**：
+   - **可交互终端**（检测到 TTY）：询问「是否按建议分级准入，或输入 `low/medium/high` 修改」，确认后写入 `allowed=True`；
+   - **非交互终端**（子进程 / nanobot `--tool` 结构化调用）：直接按建议分级完成准入。
 
 ```bash
-# 接入：返回建议分级 risk 与分级原因 reasons（此刻 admitted=false，尚未准入）
+# 交互终端：回显建议分级与原因后，询问确认或修改分级，再完成准入
 python cli.py --tool import_tool --param path=<外部项目路径>
 
-# 确认：沿用评估分级（省略 risk）即准入
+# 非交互终端（子进程 / nanobot --tool）：直接按建议分级准入
+python cli.py --tool import_tool --param path=<外部项目路径>
+```
+
+接入后如需再调整分级，可用 `confirm_tool_risk`：
+
+```bash
+# 沿用评估分级（省略 risk）即准入
 python cli.py --tool confirm_tool_risk --param tool=<name>
 
 # 或：修改分级后准入（如改成 medium）
@@ -214,7 +240,7 @@ nanobot：调用 skill `tool-security` → 执行 python cli.py "读取 sample.t
 CLI：[成功] {'path': '.../data/sample.txt', 'content': '...', ...}
 ```
 
-退出码约定：`0`=成功、`2`=拦截、`3`=执行异常；stdout 打印 `[成功]/[blocked]/[denied]`。
+退出码约定：`0`=成功、`2`=拦截、`3`=执行异常或拒绝、`4`=待人类批准（pending）；stdout 打印 `[成功]/[blocked]/[denied]/[待批准]`。
 （安装：`pip install nanobot-ai`，随后在 workspace 下运行 `nanobot` 即可；调用本 skill 无需 nanobot 专属 API。）
 
 ## 测试
@@ -225,10 +251,12 @@ python -m unittest discover -s tests -v
 
 测试覆盖：工具白名单拦截、目录白名单拦截、最小权限拦截、危险操作确认（通过/拒绝）、
 命令白名单拦截、意图路由、审计日志落盘且不含参数值、休眠/激活模式，评估引擎
-（bandit 风险分级、pip-audit 白名单准入、离线降级、内置工具函数级评估），以及
-分级确认环（import_tool 建议分级与原因回显、confirm_tool_risk 确认/修改分级并准入）。
+（bandit 风险分级、pip-audit 白名单准入、离线降级、内置工具函数级评估），
+分级确认环（import_tool 建议分级与原因回显、交互确认/修改分级、非交互按建议直接准入，
+confirm_tool_risk 再调整分级并准入），以及显式批准（待批准请求两段式：生成、批准、
+重放、一次性消费、参数/工具绑定、过期清理）。
 
 ## 已知问题
 
 - 关键词路由为雏形；复杂自然语言需在 `.env` 配置 DeepSeek 后切换 LLM 路由。
-- `nanobot` / `FastAPI` 未作为本项目运行期依赖，仅按课程要求提供可被 nanobot 加载的 Skill + Script 接口。
+- `nanobot` 未作为本项目运行期依赖，仅按课程要求提供可被 nanobot 加载的 Skill + Script 接口。

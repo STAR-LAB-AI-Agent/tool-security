@@ -133,7 +133,7 @@
 |------|----------|------|
 | 评估引擎 | `assessor.py` | 接入 bandit（源码危险模式扫描）与 pip-audit（依赖 CVE 审计），自动产出风险等级与白名单准入建议，并生成可读中文「分级原因」 |
 | 外部工具收编 | `importer.py` / `external_tools.py` | `import_tool` 把外部 Skill + Script 项目整包复制到 `external/<name>/`、生成声明 SKILL.md、评估并注册为 deny-by-default，运行期以 subprocess 调用 |
-| 分级确认环 | `config_tools.py` 的 `confirm_tool_risk` | 「扫描 → 建议分级及原因 → 回显 → 用户确认/修改分级并准入」，用户始终是分级的最终决定者 |
+| 分级确认环 | `config_tools.py` 的 `import_tool` / `confirm_tool_risk` | 「扫描 → 建议分级及原因 → 回显 → 用户确认/修改分级并准入」；`import_tool` 在交互终端询问确认、非交互终端按建议直接准入，用户始终是分级的最终决定者 |
 | 休眠/激活 | `policy_store.py` 的 `Policy.enabled` | 安全控制默认休眠（业务旁路、只审计），首次执行配置工具后自动激活并持久化 |
 
 这些扩展遵循同一元级约束：**配置工具强制用户确认，`auto_approve` 不生效**；评估结果只作建议，最终准入与分级由用户确认。

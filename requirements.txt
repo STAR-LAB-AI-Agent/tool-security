@@ -5,5 +5,3 @@ pip-audit==2.10.1    # Apache-2.0，Trail of Bits 依赖漏洞审计（需联网
 
 # 可选扩展（接入真实 LLM 智能体入口时按需安装）：
 # nanobot
-# fastapi
-# uvicorn

@@ -21,6 +21,7 @@ from .directory_policy import DirectoryPolicy, RuntimePolicy
 from .external_tools import run_external_tool
 from .gateway import ToolGateway
 from .llm_router import LLMRouter
+from .pending_approval import PendingStore
 from .policy_store import Policy, load_policy, save_policy
 from .registry import describe_tools, describe_tools_for_llm, get_tool
 from .security import AgentConfig, RiskLevel, SecurityError, ToolResult
@@ -44,10 +45,13 @@ _CONFIG_INTENT_RULES: List[Tuple[str, re.Pattern]] = [
     ("import_tool", re.compile(r"接入|导入|收编|onboard|import")),
     ("assess_tool", re.compile(r"评估.*(工具|风险|等级)|审计.*工具|扫描.*工具|工具.*(评估|审计|扫描)")),
     ("configure_tools", re.compile(r"安全控制|权限划分|权限设置|权限配置|工具安全")),
+    # confirm_tool_risk 需排在 set_max_risk 之前：二者都可能命中「风险等级」，
+    # 但「把 <工具> 的风险等级调整为 …」应属于工具级分级确认，而非会话最大风险。
+    # 第三分支用 (?<!最大) 排除「把最大风险设为 …」这类会话级表达，避免被误判为工具级。
+    ("confirm_tool_risk", re.compile(r"分级|准入|确认.*(风险|等级)|(?<!最大)(风险|等级).*(改成|改为|修改|调整|设为)")),
     ("set_max_risk", re.compile(r"最小权限|只读权限|风险等级|最大风险")),
     ("add_directory_whitelist", re.compile(r"目录白名单|允许访问.*目录|只允许访问")),
     ("add_command_whitelist", re.compile(r"命令白名单|允许执行.*命令|只允许.*命令")),
-    ("confirm_tool_risk", re.compile(r"分级|准入|确认.*(风险|等级)|(分级|风险).*(改成|改为|修改|调整|设为)")),
     ("set_tool_policy", re.compile(r"限制.*(使用|调用)|禁止.*(使用|调用)|允许.*(使用|调用)|禁用|启用")),
 ]
 
@@ -65,12 +69,14 @@ class ToolSecurityAgent:
         *,
         input_fn: Optional[Callable[[str], str]] = None,
         policy_path: Optional[Union[str, Path]] = None,
+        pending_store: Optional[PendingStore] = None,
     ):
         self.config = config or AgentConfig()
         self.llm_router = llm_router  # 可选：接入真实 LLM 做意图路由
         self.audit = audit_logger
         self.directory_policy = directory_policy
         self.policy_path = policy_path
+        self.pending_store = pending_store
         self.policy = self._resolve_policy(policy, policy_path)
         self.gateway = ToolGateway(
             directory_policy, audit_logger, self.config, policy=self.policy,
@@ -78,7 +84,7 @@ class ToolSecurityAgent:
         self.session_id = self.gateway.session_id
         self.config_executor = ConfigExecutor(
             self.policy, audit_logger, self.config, self.session_id,
-            input_fn=input_fn, policy_path=policy_path,
+            input_fn=input_fn, policy_path=policy_path, pending_store=pending_store,
         )
 
     @staticmethod
@@ -168,6 +174,28 @@ class ToolSecurityAgent:
             if m:
                 params["risk"] = m.group(1).lower()
             return params
+        if tool_name == "set_tool_policy":
+            # 兜底抽取：tool（引号/「工具：」/动词后），allowed（禁止/允许），risk（low/medium/high）
+            params: Dict[str, Any] = {}
+            quoted = re.search(r"[\"“']([^\"”']+)[\"”']", intent)
+            if quoted:
+                params["tool"] = quoted.group(1)
+            else:
+                m = re.search(r"(?:工具|名称|name)\s*[：:]?\s*([\w.-]+)", intent, re.IGNORECASE)
+                if m:
+                    params["tool"] = m.group(1).strip()
+                else:
+                    m2 = re.search(r"(?:禁止|允许|禁用|启用|限制)\s*(?:调用|使用)?\s*[:：]?\s*([\w.-]+)", intent)
+                    if m2:
+                        params["tool"] = m2.group(1).strip()
+            if re.search(r"禁止|禁用|限制|不允许|停用", intent):
+                params["allowed"] = False
+            elif re.search(r"允许|启用|开放|放行", intent):
+                params["allowed"] = True
+            m = re.search(r"\b(low|medium|high)\b", intent, re.IGNORECASE)
+            if m:
+                params["risk"] = m.group(1).lower()
+            return params
         return {}
 
     def _require_known_tool(self, name: str) -> None:
@@ -231,24 +259,34 @@ class ToolSecurityAgent:
             tool_name, params, intent_label=intent_label, allowed_tools=allowed_tools,
         )
 
-    def run_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
+    def run_tool(self, tool_name: str, params: Dict[str, Any], pending_id: Optional[str] = None) -> Any:
         """结构化调用入口：调用方已选好工具与参数，直接执行，不做意图路由。
 
         与 run() 的区别：run() 先 route() 把自然语言翻译成（工具名，参数）；
         run_tool() 跳过路由，直接交给对应执行器。适合宿主 agent（如 nanobot）以
         Skill + Script 方式调用：宿主 LLM 已完成「选工具 + 抽参数」，此处不再重复
         理解，也不依赖本项目的 LLM / 关键词路由。
+
+        pending_id：两段式显式批准的重放凭证，仅对配置工具有效；业务工具忽略。
         """
         self._require_known_tool(tool_name)
         if get_config_tool(tool_name) is not None:
-            return self._run_config(tool_name, params, tool_name)
+            return self._run_config(tool_name, params, tool_name, pending_id=pending_id)
         if not self.policy.enabled:
             return self._execute_unrestricted(tool_name, params, tool_name)
         return self.gateway.execute(tool_name, params, intent_label=tool_name)
 
-    def _run_config(self, tool_name: str, params: Dict[str, Any], intent_label: str) -> Any:
+    def _run_config(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        intent_label: str,
+        pending_id: Optional[str] = None,
+    ) -> Any:
         """配置工具走 ConfigExecutor（强制确认 + 审计）；成功后激活安全控制并持久化。"""
-        result = self.config_executor.execute(tool_name, params, intent_label=intent_label)
+        result = self.config_executor.execute(
+            tool_name, params, intent_label=intent_label, pending_id=pending_id,
+        )
         if result.ok and not self.policy.enabled:
             self.policy.enabled = True
             self._persist_policy()

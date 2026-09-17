@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from core.agent import ToolSecurityAgent
 from core.audit import AuditLogger
@@ -113,6 +114,18 @@ class TestConfigExecutor(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertEqual(result.decision, "blocked")
 
+    def test_config_tool_non_interactive_returns_blocked(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex = _make_executor(Path(d))  # 无 confirm_fn，模拟 nanobot 非交互子进程
+            with mock.patch(
+                "core.config_tools._is_interactive_terminal", return_value=False
+            ):
+                result = ex.execute("set_max_risk", {"risk": "low"})
+            self.assertFalse(result.ok)
+            self.assertEqual(result.decision, "blocked")
+            self.assertIn("交互", result.error)
+            self.assertEqual(ex.policy.max_risk, RiskLevel.HIGH)  # 未做任何修改
+
     def test_confirm_tool_risk_keeps_assessed(self):
         with tempfile.TemporaryDirectory() as d:
             ex = _make_executor(Path(d), confirm_fn=lambda tool, keys: True)
@@ -159,6 +172,41 @@ class TestAgentConfigRouting(unittest.TestCase):
             result = agent.run("我希望对现有工具做安全控制")
             self.assertTrue(result.ok)
             self.assertIn("max_risk", result.data)
+
+    def _route_agent(self, ws: Path) -> ToolSecurityAgent:
+        return ToolSecurityAgent(
+            DirectoryPolicy([ws]),
+            AuditLogger(ws / "audit.jsonl"),
+            AgentConfig(),
+        )
+
+    def test_keyword_routes_session_max_risk(self):
+        with tempfile.TemporaryDirectory() as d:
+            agent = self._route_agent(Path(d))
+            tool, params = agent.route("设置风险等级为 low")
+            self.assertEqual(tool, "set_max_risk")
+            self.assertEqual(params, {"risk": "low"})
+
+    def test_keyword_routes_session_max_risk_via_max(self):
+        with tempfile.TemporaryDirectory() as d:
+            agent = self._route_agent(Path(d))
+            tool, params = agent.route("把最大风险设为 low")
+            self.assertEqual(tool, "set_max_risk")
+            self.assertEqual(params, {"risk": "low"})
+
+    def test_keyword_routes_tool_risk_adjust_to_confirm(self):
+        with tempfile.TemporaryDirectory() as d:
+            agent = self._route_agent(Path(d))
+            tool, params = agent.route("把 delete_file 的风险等级调整为 medium")
+            self.assertEqual(tool, "confirm_tool_risk")
+            self.assertEqual(params, {"tool": "delete_file", "risk": "medium"})
+
+    def test_keyword_routes_tool_policy_disable(self):
+        with tempfile.TemporaryDirectory() as d:
+            agent = self._route_agent(Path(d))
+            tool, params = agent.route("禁止调用 delete_file")
+            self.assertEqual(tool, "set_tool_policy")
+            self.assertEqual(params, {"tool": "delete_file", "allowed": False})
 
 
 class TestConfigureToolsWizard(unittest.TestCase):

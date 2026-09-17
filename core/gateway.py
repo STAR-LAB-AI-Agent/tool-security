@@ -129,7 +129,7 @@ class ToolGateway:
             if override is None or not override.allowed:
                 reason = (
                     f"工具未准入：'{tool_name}' 尚未显式准入，"
-                    f"请先通过风险控制流程（confirm_tool_risk 确认分级）准入"
+                    f"请先通过 import_tool 接入并准入，或用 confirm_tool_risk 确认分级准入"
                 )
                 return _record("blocked", reason, reason)
 

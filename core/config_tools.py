@@ -11,14 +11,16 @@ M2 只交付「可路由 + 可执行（改 Policy 草稿）」；多轮确认向
 from __future__ import annotations
 
 import inspect
+import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .assessor import assess_builtin_tools, assess_tool_source
 from .audit import AuditLogger
 from .guard import confirm_operation
 from .importer import import_external_tool
+from .pending_approval import PendingStore
 from .policy_store import Policy, ToolPolicy, save_policy
 from .registry import TOOL_REGISTRY
 from .security import AgentConfig, RiskLevel, SecurityError, Tool, ToolResult
@@ -123,18 +125,69 @@ def _configure_tools(
     return policy.to_dict()
 
 
+def _is_interactive_terminal() -> bool:
+    """检测当前进程是否运行在可交互终端（TTY）中。"""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _prompt_tool_admission(
+    input_fn: Callable[[str], str],
+    tool_name: str,
+    suggested: RiskLevel,
+    reasons: List[str],
+) -> RiskLevel:
+    """回显建议分级与依据，询问确认或修改分级（可交互终端）。"""
+    lines = [
+        f"[工具接入] {tool_name} 扫描完成，建议风险等级：{suggested.value}",
+        "分级依据：",
+    ]
+    lines += [f"  - {r}" for r in reasons]
+    prompt = "\n".join(lines) + (
+        f"\n是否按建议分级 '{suggested.value}' 准入？"
+        "[y/回车=确认] 或输入新等级 low/medium/high "
+    )
+    answer = input_fn(prompt).strip().lower()
+    if answer in ("", "y", "yes"):
+        return suggested
+    return _parse_risk(answer)
+
+
 def _import_tool(
     policy: Policy,
     path: str,
     name: Optional[str] = None,
+    *,
+    input_fn: Optional[Callable[[str], str]] = None,
+    interactive: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """接入一个外部 Skill + Script 项目：复制、声明、评估、注册，默认未准入。"""
+    """接入外部工具并完成分级准入（接入 → 扫描分级 → 回显 → 用户确认）。
+
+    - 可交互终端（interactive=True）：回显建议分级与依据，询问按建议准入或
+      输入新等级修改，确认后写入 allowed=True 准入；
+    - 非交互终端（interactive=False / 未检测到 TTY）：直接按建议分级完成准入。
+    """
     result = import_external_tool(path, name=name)
-    # 评估结果写入策略：记录风险等级，但 allowed=False（deny-by-default，需显式准入）。
-    policy.tool_policies[result["tool"]] = ToolPolicy(
-        allowed=False,
-        risk=RiskLevel(result["risk"]),
-    )
+    tool_name = result["tool"]
+    suggested = RiskLevel(result["risk"])
+
+    if interactive is None:
+        interactive = _is_interactive_terminal()
+
+    confirmed = suggested
+    if interactive:
+        confirmed = _prompt_tool_admission(
+            input_fn or input, tool_name, suggested, result["reasons"]
+        )
+
+    policy.tool_policies[tool_name] = ToolPolicy(allowed=True, risk=confirmed)
+
+    result["admitted"] = True
+    result["assessed_risk"] = suggested.value
+    result["confirmed_risk"] = confirmed.value
+    result["allowed"] = True
     return result
 
 
@@ -247,7 +300,7 @@ CONFIG_REGISTRY: Dict[str, Tool] = {
     ),
     "import_tool": Tool(
         name="import_tool",
-        description="接入一个外部 Skill + Script 项目：自动复制到 external/、生成声明、评估风险并注册，默认拦截待准入",
+        description="接入外部 Skill + Script 项目：自动复制、生成声明、评估风险，交互终端询问确认分级，非交互终端按建议分级直接准入",
         func=_import_tool,
         risk=RiskLevel.HIGH,
         category="安全配置",
@@ -320,6 +373,8 @@ class ConfigExecutor:
         *,
         input_fn: Optional[Callable[[str], str]] = None,
         policy_path: Optional[Union[str, Path]] = None,
+        pending_store: Optional[PendingStore] = None,
+        pending_ttl: Optional[int] = None,
     ):
         self.policy = policy
         self.audit = audit_logger
@@ -327,6 +382,8 @@ class ConfigExecutor:
         self.session_id = session_id
         self.input_fn = input_fn if input_fn is not None else input
         self.policy_path = policy_path
+        self.pending_store = pending_store
+        self.pending_ttl = pending_ttl
 
     def execute(
         self,
@@ -334,6 +391,7 @@ class ConfigExecutor:
         params: Dict[str, Any],
         *,
         intent_label: str = "",
+        pending_id: Optional[str] = None,
     ) -> ToolResult:
         started = time.perf_counter()
 
@@ -357,18 +415,69 @@ class ConfigExecutor:
             )
             return ToolResult(ok=False, error=error or reason, decision=decision)
 
-        # 强制确认：配置动作必须经用户确认，auto_approve 不生效。
-        res = confirm_operation(
-            tool, params_keys,
-            confirm_fn=self.config.confirm_fn,
-            auto_approve=False,
-        )
-        if not res.approved:
-            return _record("denied", res.reason, res.reason)
+        # import_tool 自带「回显 → 确认/准入」交互环，不经过通用前置确认；
+        # 其余配置动作必须经用户确认（auto_approve 不生效）。
+        if tool_name != "import_tool":
+            if pending_id is not None:
+                # 两段式显式批准：人类已批准，重放执行前校验并一次性消费。
+                if self.pending_store is None:
+                    return _record("blocked", "当前环境未启用待批准存储，无法消费批准请求", None)
+                ok, msg = self.pending_store.consume(pending_id, tool_name, params)
+                if not ok:
+                    return _record("denied", msg, msg)
+            elif _is_interactive_terminal():
+                res = confirm_operation(
+                    tool, params_keys,
+                    confirm_fn=self.config.confirm_fn,
+                    auto_approve=False,
+                )
+                if not res.approved:
+                    return _record("denied", res.reason, res.reason)
+            else:
+                # 非交互终端：优先走「待批准」两段式；未启用时保持原安全拒绝。
+                if self.pending_store is not None and tool_name != "configure_tools":
+                    req = self.pending_store.create(
+                        tool_name, params, intent_label, ttl=self.pending_ttl,
+                    )
+                    reason = (
+                        f"配置工具 '{tool_name}' 需人类显式批准；已生成待批准请求，"
+                        f"请在本机交互终端执行 python cli.py --approve {req.id} 后重放"
+                    )
+                    self.audit.record(
+                        self.session_id, intent_label, tool_name, tool.risk, params_keys,
+                        "pending", reason, False, (time.perf_counter() - started) * 1000,
+                        detail={"request_id": req.id},
+                    )
+                    return ToolResult(
+                        ok=False, decision="pending", error=reason,
+                        data={
+                            "request_id": req.id,
+                            "approve_cmd": f"python cli.py --approve {req.id}",
+                        },
+                    )
+                # 未启用待批准：非交互无 TTY 时，confirm_fn 可能抛 SecurityError，提前友好拦截。
+                if self.config.confirm_fn is None:
+                    reason = (
+                        f"配置工具 '{tool_name}' 需要交互式确认，当前非交互终端无法完成；"
+                        f"请在交互终端执行，或由宿主 Agent 询问用户后注入确认"
+                    )
+                    return _record("blocked", reason, reason)
+                try:
+                    res = confirm_operation(
+                        tool, params_keys,
+                        confirm_fn=self.config.confirm_fn,
+                        auto_approve=False,
+                    )
+                except SecurityError as e:
+                    return _record("blocked", str(e), str(e))
+                if not res.approved:
+                    return _record("denied", res.reason, res.reason)
 
         try:
             if tool_name == "configure_tools":
                 data = tool.func(self.policy, input_fn=self.input_fn)
+            elif tool_name == "import_tool":
+                data = tool.func(self.policy, input_fn=self.input_fn, **params)
             else:
                 data = tool.func(self.policy, **params)
             if self.policy_path is not None:
