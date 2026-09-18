@@ -207,6 +207,32 @@ class TestTaskLeastPrivilege(unittest.TestCase):
             self.assertIn("hello", result.data["content"])
 
 
+class _FakeRouter:
+    """模拟「路由选工具」与「最小权限规划」两路 LLM 输出不一致的场景。"""
+
+    available = True
+
+    def route(self, intent, tools_desc):
+        return "read_file", {"path": "a.txt"}
+
+    def resolve_tools(self, intent, tools_desc):
+        return ["run_command"]
+
+
+class TestAllowlistConsistency(unittest.TestCase):
+    """路由选中的工具必须纳入最小权限集，避免两路 LLM 决策不一致导致误拦。"""
+
+    def test_routed_tool_always_in_allowlist(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = Path(d)
+            (ws / "a.txt").write_text("hello", encoding="utf-8")
+            agent = _make_agent(ws, ws / "audit.jsonl", policy=Policy(enabled=True))
+            agent.llm_router = _FakeRouter()
+            result = agent.run("读取 a.txt")
+            self.assertTrue(result.ok, result.error)
+            self.assertIn("hello", result.data["content"])
+
+
 class TestParamFilter(unittest.TestCase):
     """按工具签名过滤 LLM 可能多给的参数键。"""
 

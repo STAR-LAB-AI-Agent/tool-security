@@ -12,3 +12,9 @@ SOUL.md
 USER.md
 memory/
 prompts/
+
+# runtime-generated / imported external tool state (absolute paths, machine-specific)
+sessions/
+external/
+config/external_tools.json
+skills/ppt-reorganize/

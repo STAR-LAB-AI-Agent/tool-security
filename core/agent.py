@@ -254,7 +254,7 @@ class ToolSecurityAgent:
         if not self.policy.enabled:
             # 休眠态：安全控制未激活，业务工具旁路执行（仅审计，不拦截）
             return self._execute_unrestricted(tool_name, params, intent_label)
-        allowed_tools = self._derive_allowlist(intent)
+        allowed_tools = self._derive_allowlist(intent, tool_name)
         return self.gateway.execute(
             tool_name, params, intent_label=intent_label, allowed_tools=allowed_tools,
         )
@@ -338,21 +338,26 @@ class ToolSecurityAgent:
             )
             return ToolResult(ok=False, error=reason, decision="error")
 
-    def _derive_allowlist(self, intent: str) -> Optional[Set[str]]:
+    def _derive_allowlist(self, intent: str, routed_tool: str) -> Optional[Set[str]]:
         """按任务自动推导最小工具集（最小权限的自动化）。
 
         仅当配置了可用 LLM 时生效；推导失败或未配置时返回 None（回退到 max_risk 分级）。
         推导结果叠加两道兜底：工具白名单（必须已注册）+ max_risk（不越权）。
+        路由已选定的工具必然属于本次任务的最小工具集，直接纳入，避免「路由选工具」
+        与「权限规划」两路 LLM 决策不一致导致误拦。
         """
         if self.llm_router is None or not self.llm_router.available:
             return None
+        allowed = set()
+        routed = get_tool(routed_tool)
+        if routed is not None and routed.risk.rank <= self.config.max_risk.rank:
+            allowed.add(routed_tool)
         try:
             tools = self.llm_router.resolve_tools(
                 intent, describe_tools_for_llm(self.config.max_risk)
             )
         except SecurityError:
-            return None
-        allowed = set()
+            return allowed or None
         for name in tools:
             tool = get_tool(name)
             if tool is not None and tool.risk.rank <= self.config.max_risk.rank:
